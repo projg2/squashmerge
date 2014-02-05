@@ -12,6 +12,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <arpa/inet.h> /* for endian conversion */
 
 #ifdef HAVE_STDINT_H
@@ -122,6 +124,71 @@ struct sqdelta_header read_sqdelta_header(const struct mmap_file* f)
 	return out;
 }
 
+int run_xdelta3(struct mmap_file* patch, struct mmap_file* output,
+		const char* input_path)
+{
+	pid_t child_pid = fork();
+
+	if (child_pid == -1)
+	{
+		fprintf(stderr, "fork() failed\n"
+				"\terrno: %s\n", strerror(errno));
+		return 0;
+	}
+
+	if (child_pid == 0)
+	{
+		/* child */
+		if (close(0) == -1)
+		{
+			fprintf(stderr, "Unable to close stdin in child\n"
+					"\terrno: %s\n", strerror(errno));
+			exit(1);
+		}
+		if (close(1) == -1)
+		{
+			fprintf(stderr, "Unable to close stdout in child\n"
+					"\terrno: %s\n", strerror(errno));
+			exit(1);
+		}
+
+		if (dup2(patch->fd, 0) == -1)
+		{
+			fprintf(stderr, "Unable to dup2() patch file into stdin\n"
+					"\terrno: %s\n", strerror(errno));
+			exit(1);
+		}
+		if (dup2(output->fd, 1) == -1)
+		{
+			fprintf(stderr, "Unable to dup2() output file into stdout\n"
+					"\terrno: %s\n", strerror(errno));
+			exit(1);
+		}
+
+		if (execlp("xdelta3",
+					"xdelta3", "-c", "-d", "-s", input_path, 0) == -1)
+		{
+			fprintf(stderr, "execlp() failed\n"
+					"\terrno: %s\n", strerror(errno));
+			exit(1);
+		}
+	}
+	else
+	{
+		int ret;
+		waitpid(child_pid, &ret, 0);
+
+		if (WEXITSTATUS(ret) != 0)
+		{
+			fprintf(stderr, "Child exited with non-success status\n"
+					"\texit status: %d\n", WEXITSTATUS(ret));
+			return 0;
+		}
+	}
+
+	return 1;
+}
+
 int main(int argc, char* argv[])
 {
 	const char* source_file;
@@ -176,143 +243,168 @@ int main(int argc, char* argv[])
 			if (!source_blocks)
 				break;
 
-			{
-				const char* tmpdir = getenv("TMPDIR");
-#ifdef _P_tmpdir
-				if (!tmpdir)
-					tmpdir = P_tmpdir;
-#endif
-				if (!tmpdir)
-					tmpdir = "/tmp";
-
-				if (chdir(tmpdir) == -1)
-				{
-					fprintf(stderr, "Unable to enter temporary directory.\n"
-							"\tpath: %s\n"
-							"\terrno: %s\n", tmpdir, strerror(errno));
-					break;
-				}
-			}
-
-			block_list_size = sizeof(*source_blocks) * dh.block_count;
-
-			tmp_length += source_f.length;
-			tmp_length += sizeof(dh);
-			tmp_length += block_list_size;
-
-			for (i = 0; i < dh.block_count; ++i)
-			{
-				size_t unc_length = ntohl(source_blocks[i].uncompressed_length);
-				tmp_length += unc_length;
-			}
-
-			temp_source_f = mmap_create_temp(tmp_name_buf, tmp_length);
+			/* open target before chdir() */
+			target_f = mmap_create_without_mapping(target_file);
+			if (target_f.fd == -1)
+				break;
 
 			do
 			{
-				size_t prev_offset = 0;
-				int failed = 0;
+				{
+					const char* tmpdir = getenv("TMPDIR");
+#ifdef _P_tmpdir
+					if (!tmpdir)
+						tmpdir = P_tmpdir;
+#endif
+					if (!tmpdir)
+						tmpdir = "/tmp";
+
+					if (chdir(tmpdir) == -1)
+					{
+						fprintf(stderr, "Unable to enter temporary directory.\n"
+								"\tpath: %s\n"
+								"\terrno: %s\n", tmpdir, strerror(errno));
+						break;
+					}
+				}
+
+				block_list_size = sizeof(*source_blocks) * dh.block_count;
+
+				tmp_length += source_f.length;
+				tmp_length += sizeof(dh);
+				tmp_length += block_list_size;
 
 				for (i = 0; i < dh.block_count; ++i)
 				{
-					size_t offset = ntohl(source_blocks[i].offset);
-					size_t length = ntohl(source_blocks[i].length);
-
-					void* in_pos = mmap_read(&source_f, prev_offset,
-							offset - prev_offset);
-					void* out_pos = mmap_read(&temp_source_f,
-							prev_offset, offset - prev_offset);
-
-					if (!in_pos || !out_pos)
-					{
-						failed = 1;
-						break;
-					}
-
-					memcpy(out_pos, in_pos, offset - prev_offset);
-					prev_offset = offset + length;
-				}
-				if (failed)
-					break;
-
-				/* the last block */
-				{
-					void* in_pos = mmap_read(&source_f, prev_offset,
-							source_f.length - prev_offset);
-					void* out_pos = mmap_read(&temp_source_f,
-							prev_offset, source_f.length - prev_offset);
-
-					if (!in_pos || !out_pos)
-					{
-						failed = 1;
-						break;
-					}
-
-					memcpy(out_pos, in_pos, source_f.length - prev_offset);
-				}
-
-				prev_offset = source_f.length;
-				for (i = 0; i < dh.block_count; ++i)
-				{
-					size_t offset = ntohl(source_blocks[i].offset);
-					size_t length = ntohl(source_blocks[i].length);
 					size_t unc_length = ntohl(source_blocks[i].uncompressed_length);
-					size_t ret;
-
-					void* in_pos = mmap_read(&source_f, offset, length);
-					void* out_pos = mmap_read(&temp_source_f,
-							prev_offset, unc_length);
-
-					if (!in_pos || !out_pos)
-					{
-						failed = 1;
-						break;
-					}
-
-					ret = compressor_decompress(sb.compression,
-							out_pos, in_pos, length, unc_length);
-
-					if (ret != unc_length)
-					{
-						if (ret != 0)
-							fprintf(stderr, "Block decompression resulted in different size.\n"
-									"\toffset: 0x%08lx\n"
-									"\tlength: %lu\n"
-									"\texpected unpacked length: %lu\n"
-									"\treal unpacked length: %lu\n",
-									offset, length, unc_length, ret);
-
-						failed = 1;
-						break;
-					}
-
-					prev_offset += unc_length;
+					tmp_length += unc_length;
 				}
-				if (failed)
-					break;
 
-				/* copy the block lists and the header */
+				temp_source_f = mmap_create_temp(tmp_name_buf, tmp_length);
+
+				do
 				{
-					void* in_pos = mmap_read(&patch_f, sizeof(dh),
-							block_list_size);
-					void* out_pos = mmap_read(&temp_source_f,
-							prev_offset, block_list_size);
-					if (!in_pos || !out_pos)
-						break;
-					memcpy(out_pos, in_pos, block_list_size);
+					do
+					{
+						size_t prev_offset = 0;
+						int failed = 0;
 
-					prev_offset += block_list_size;
-					in_pos = mmap_read(&patch_f, 0, sizeof(dh));
-					out_pos = mmap_read(&temp_source_f,
-							prev_offset, sizeof(dh));
-					if (!in_pos || !out_pos)
+						for (i = 0; i < dh.block_count; ++i)
+						{
+							size_t offset = ntohl(source_blocks[i].offset);
+							size_t length = ntohl(source_blocks[i].length);
+
+							void* in_pos = mmap_read(&source_f, prev_offset,
+									offset - prev_offset);
+							void* out_pos = mmap_read(&temp_source_f,
+									prev_offset, offset - prev_offset);
+
+							if (!in_pos || !out_pos)
+							{
+								failed = 1;
+								break;
+							}
+
+							memcpy(out_pos, in_pos, offset - prev_offset);
+							prev_offset = offset + length;
+						}
+						if (failed)
+							break;
+
+						/* the last block */
+						{
+							void* in_pos = mmap_read(&source_f, prev_offset,
+									source_f.length - prev_offset);
+							void* out_pos = mmap_read(&temp_source_f,
+									prev_offset, source_f.length - prev_offset);
+
+							if (!in_pos || !out_pos)
+							{
+								failed = 1;
+								break;
+							}
+
+							memcpy(out_pos, in_pos, source_f.length - prev_offset);
+						}
+
+						prev_offset = source_f.length;
+						for (i = 0; i < dh.block_count; ++i)
+						{
+							size_t offset = ntohl(source_blocks[i].offset);
+							size_t length = ntohl(source_blocks[i].length);
+							size_t unc_length = ntohl(source_blocks[i].uncompressed_length);
+							size_t ret;
+
+							void* in_pos = mmap_read(&source_f, offset, length);
+							void* out_pos = mmap_read(&temp_source_f,
+									prev_offset, unc_length);
+
+							if (!in_pos || !out_pos)
+							{
+								failed = 1;
+								break;
+							}
+
+							ret = compressor_decompress(sb.compression,
+									out_pos, in_pos, length, unc_length);
+
+							if (ret != unc_length)
+							{
+								if (ret != 0)
+									fprintf(stderr, "Block decompression resulted in different size.\n"
+											"\toffset: 0x%08lx\n"
+											"\tlength: %lu\n"
+											"\texpected unpacked length: %lu\n"
+											"\treal unpacked length: %lu\n",
+											offset, length, unc_length, ret);
+
+								failed = 1;
+								break;
+							}
+
+							prev_offset += unc_length;
+						}
+						if (failed)
+							break;
+
+						/* copy the block lists and the header */
+						{
+							void* in_pos = mmap_read(&patch_f, sizeof(dh),
+									block_list_size);
+							void* out_pos = mmap_read(&temp_source_f,
+									prev_offset, block_list_size);
+							if (!in_pos || !out_pos)
+								break;
+							memcpy(out_pos, in_pos, block_list_size);
+
+							prev_offset += block_list_size;
+							in_pos = mmap_read(&patch_f, 0, sizeof(dh));
+							out_pos = mmap_read(&temp_source_f,
+									prev_offset, sizeof(dh));
+							if (!in_pos || !out_pos)
+								break;
+							memcpy(out_pos, in_pos, sizeof(dh));
+						}
+					} while (0);
+
+					mmap_close(&temp_source_f);
+
+					if (lseek(patch_f.fd, sizeof(dh) + block_list_size,
+								SEEK_SET) == -1)
+					{
+						fprintf(stderr, "Unable to seek patch file for applying.\n"
+								"\terrno: %s\n", strerror(errno));
 						break;
-					memcpy(out_pos, in_pos, sizeof(dh));
-				}
+					}
+
+					/* run xdelta3 to obtain the expanded target file */
+					run_xdelta3(&patch_f, &target_f, tmp_name_buf);
+				} while (0);
+
+				unlink(tmp_name_buf);
 			} while (0);
 
-			mmap_close(&temp_source_f);
-			unlink(tmp_name_buf);
+			mmap_close(&target_f);
 		} while (0);
 
 		mmap_close(&patch_f);

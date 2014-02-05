@@ -96,18 +96,39 @@ struct mmap_file mmap_create_temp(char* path_buf, size_t size)
 	return out;
 }
 
+struct mmap_file mmap_create_without_mapping(const char* path)
+{
+	struct mmap_file out;
+
+	out.fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0666);
+	if (out.fd == -1)
+	{
+		fprintf(stderr, "Unable to open file.\n"
+				"\tpath: %s\n"
+				"\terrno: %s\n", path, strerror(errno));
+		return out;
+	}
+	out.data = 0;
+	out.length = 0;
+
+	return out;
+}
+
 void mmap_close(struct mmap_file* f)
 {
-	if (msync(f->data, f->length, MS_SYNC) == -1)
+	if (f->data)
 	{
-		fprintf(stderr, "File update failed.\n"
-				"\terrno: %s\n", strerror(errno));
-	}
+		if (msync(f->data, f->length, MS_SYNC) == -1)
+		{
+			fprintf(stderr, "File update failed.\n"
+					"\terrno: %s\n", strerror(errno));
+		}
 
-	if (munmap(f->data, f->length) == -1)
-	{
-		fprintf(stderr, "Unable unmap file.\n"
-				"\terrno: %s\n", strerror(errno));
+		if (munmap(f->data, f->length) == -1)
+		{
+			fprintf(stderr, "Unable unmap file.\n"
+					"\terrno: %s\n", strerror(errno));
+		}
 	}
 
 	if (close(f->fd) == -1)
