@@ -32,9 +32,60 @@ struct sqdelta_header
 	uint32_t flags;
 	uint32_t block_count;
 };
+
+struct squashfs_header
+{
+	uint32_t magic;
+	uint32_t unused[4];
+	uint16_t compression;
+};
 #pragma pack(pop)
 
-const uint32_t sqdelta_magic = 0x5371ceb4;
+const uint32_t sqdelta_magic = 0x5371ceb4UL;
+const uint32_t squashfs_magic = 0x73717368UL;
+const uint32_t squashfs_magic_be = 0x68737173UL;
+
+void print_file_error(FILE* f, const char* ftype)
+{
+	if (feof(f))
+		fprintf(stderr, "EOF reading %s file.\n", ftype);
+	else
+		fprintf(stderr, "Failure reading %s file.\n"
+				"\terror: %s\n", ftype, strerror(errno));
+}
+
+int read_squashfs_header(FILE* f)
+{
+	struct squashfs_header h;
+	uint16_t comp;
+
+	/* read magic */
+	if (fread(&h, sizeof(h), 1, f) < 1)
+	{
+		print_file_error(f, "source");
+		return 0;
+	}
+
+	if (h.magic == squashfs_magic)
+		comp = h.compression;
+	else if (h.magic == squashfs_magic_be)
+		comp = h.compression << 8 | h.compression >> 8;
+	else
+	{
+		fprintf(stderr, "Invalid magic in squashfs input.\n");
+		return 0;
+	}
+
+	switch (comp)
+	{
+		default:
+			fprintf(stderr, "Unsupported compression method in squashfs input.\n"
+				"\tcompressor id: %d\n", comp);
+			return 0;
+	}
+
+	return 1;
+}
 
 size_t read_sqdelta_header(FILE* f)
 {
@@ -42,11 +93,7 @@ size_t read_sqdelta_header(FILE* f)
 
 	if (fread(&h, sizeof(h), 1, f) < 1)
 	{
-		if (feof(f))
-			fprintf(stderr, "EOF reading patch file.\n");
-		else
-			fprintf(stderr, "Failure reading patch file.\n"
-					"\terror: %s\n", strerror(errno));
+		print_file_error(f, "patch");
 		return 0;
 	}
 
@@ -101,6 +148,9 @@ int main(int argc, char* argv[])
 
 	do
 	{
+		if (!read_squashfs_header(source_f))
+			break;
+
 		patch_f = fopen(patch_file, "rb");
 		if (!patch_f)
 		{
