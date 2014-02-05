@@ -18,6 +18,8 @@
 #	include <stdint.h>
 #endif
 
+#include "util.h"
+
 #pragma pack(push, 1)
 struct serialized_compressed_block
 {
@@ -45,31 +47,17 @@ const uint32_t sqdelta_magic = 0x5371ceb4UL;
 const uint32_t squashfs_magic = 0x73717368UL;
 const uint32_t squashfs_magic_be = 0x68737173UL;
 
-void print_file_error(FILE* f, const char* ftype)
+int read_squashfs_header(const struct mmap_file* f)
 {
-	if (feof(f))
-		fprintf(stderr, "EOF reading %s file.\n", ftype);
-	else
-		fprintf(stderr, "Failure reading %s file.\n"
-				"\terror: %s\n", ftype, strerror(errno));
-}
-
-int read_squashfs_header(FILE* f)
-{
-	struct squashfs_header h;
+	struct squashfs_header* h;
 	uint16_t comp;
 
-	/* read magic */
-	if (fread(&h, sizeof(h), 1, f) < 1)
-	{
-		print_file_error(f, "source");
-		return 0;
-	}
+	h = mmap_read(f, 0, sizeof(*h));
 
-	if (h.magic == squashfs_magic)
-		comp = h.compression;
-	else if (h.magic == squashfs_magic_be)
-		comp = h.compression << 8 | h.compression >> 8;
+	if (h->magic == squashfs_magic)
+		comp = h->compression;
+	else if (h->magic == squashfs_magic_be)
+		comp = h->compression << 8 | h->compression >> 8;
 	else
 	{
 		fprintf(stderr, "Invalid magic in squashfs input.\n");
@@ -87,32 +75,28 @@ int read_squashfs_header(FILE* f)
 	return 1;
 }
 
-size_t read_sqdelta_header(FILE* f)
+size_t read_sqdelta_header(const struct mmap_file* f)
 {
-	struct sqdelta_header h;
+	struct sqdelta_header* h;
 
-	if (fread(&h, sizeof(h), 1, f) < 1)
-	{
-		print_file_error(f, "patch");
-		return 0;
-	}
+	h = mmap_read(f, 0, sizeof(*h));
 
-	if (ntohl(h.magic) != sqdelta_magic)
+	if (ntohl(h->magic) != sqdelta_magic)
 	{
 		fprintf(stderr, "Incorrect magic in patch file.\n"
 				"\tmagic: %08x, expected: %08x\n",
-				ntohl(h.magic), sqdelta_magic);
+				ntohl(h->magic), sqdelta_magic);
 		return 0;
 	}
 
-	if (ntohl(h.flags))
+	if (ntohl(h->flags))
 	{
 		fprintf(stderr, "Unknown flag enabled in patch file.\n"
-				"\tflags: %08x\n", ntohl(h.flags));
+				"\tflags: %08x\n", ntohl(h->flags));
 		return 0;
 	}
 
-	return ntohl(h.block_count);
+	return ntohl(h->block_count);
 }
 
 int main(int argc, char* argv[])
@@ -121,9 +105,9 @@ int main(int argc, char* argv[])
 	const char* patch_file;
 	const char* target_file;
 
-	FILE* source_f;
-	FILE* patch_f;
-	FILE* target_f;
+	struct mmap_file source_f;
+	struct mmap_file patch_f;
+	struct mmap_file target_f;
 
 	int ret = 1;
 
@@ -137,54 +121,27 @@ int main(int argc, char* argv[])
 	patch_file = argv[2];
 	target_file = argv[3];
 
-	source_f = fopen(source_file, "rb");
-	if (!source_f)
-	{
-		fprintf(stderr, "Unable to open source file.\n"
-				"\tpath: %s\n"
-				"\terror: %s\n", source_file, strerror(errno));
+	source_f = mmap_open(source_file);
+	if (source_f.fd == -1)
 		return 1;
-	}
 
 	do
 	{
-		if (!read_squashfs_header(source_f))
-			break;
+		read_squashfs_header(&source_f);
 
-		patch_f = fopen(patch_file, "rb");
-		if (!patch_f)
-		{
-			fprintf(stderr, "Unable to open patch file.\n"
-					"\tpath: %s\n"
-					"\terror: %s\n", patch_file, strerror(errno));
+		patch_f = mmap_open(patch_file);
+		if (patch_f.fd == -1)
 			break;
-		}
 
 		do
 		{
-			size_t block_count = read_sqdelta_header(patch_f);
-			if (block_count == 0)
-				break;
-
-			unlink(target_file);
-			target_f = fopen(target_file, "wb");
-			if (!target_f)
-			{
-				fprintf(stderr, "Unable to open target file.\n"
-						"\tpath: %s\n"
-						"\terror: %s\n", target_file, strerror(errno));
-				break;
-			}
-
-			do
-			{
-
-			} while (0);
-			fclose(target_f);
+			read_sqdelta_header(&patch_f);
 		} while (0);
-		fclose(patch_f);
+
+		mmap_close(&patch_f);
 	} while (0);
-	fclose(source_f);
+
+	mmap_close(&source_f);
 
 	return ret;
 }

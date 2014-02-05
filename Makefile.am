@@ -1,7 +1,8 @@
 bin_PROGRAMS = squashmerge
 
 squashmerge_SOURCES = \
-	src/squashmerge.c
+	src/squashmerge.c \
+	src/util.c
 
 squashmerge_CPPFLAGS = \
 	$(LZO_CFLAGS)
