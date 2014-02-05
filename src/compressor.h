@@ -15,5 +15,7 @@ enum compressor_id
 };
 
 int compressor_init(enum compressor_id c);
+size_t compressor_decompress(enum compressor_id c,
+		void* dest, const void* src, size_t length, size_t out_size);
 
 #endif /*SDT_COMPRESSOR_H*/

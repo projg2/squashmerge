@@ -130,6 +130,7 @@ int main(int argc, char* argv[])
 
 	struct mmap_file source_f;
 	struct mmap_file patch_f;
+	struct mmap_file temp_source_f;
 	struct mmap_file target_f;
 
 	int ret = 1;
@@ -160,9 +161,158 @@ int main(int argc, char* argv[])
 
 		do
 		{
+			struct serialized_compressed_block* source_blocks;
+			size_t i;
+			char tmp_name_buf[] = "tmp.XXXXXX";
+			size_t tmp_length = 0;
+			size_t block_list_size;
+
 			struct sqdelta_header dh = read_sqdelta_header(&patch_f);
 			if (dh.magic == 0)
 				break;
+
+			source_blocks = mmap_read(&patch_f, sizeof(dh),
+					sizeof(*source_blocks) * dh.block_count);
+			if (!source_blocks)
+				break;
+
+			{
+				const char* tmpdir = getenv("TMPDIR");
+#ifdef _P_tmpdir
+				if (!tmpdir)
+					tmpdir = P_tmpdir;
+#endif
+				if (!tmpdir)
+					tmpdir = "/tmp";
+
+				if (chdir(tmpdir) == -1)
+				{
+					fprintf(stderr, "Unable to enter temporary directory.\n"
+							"\tpath: %s\n"
+							"\terrno: %s\n", tmpdir, strerror(errno));
+					break;
+				}
+			}
+
+			block_list_size = sizeof(*source_blocks) * dh.block_count;
+
+			tmp_length += source_f.length;
+			tmp_length += sizeof(dh);
+			tmp_length += block_list_size;
+
+			for (i = 0; i < dh.block_count; ++i)
+			{
+				size_t unc_length = ntohl(source_blocks[i].uncompressed_length);
+				tmp_length += unc_length;
+			}
+
+			temp_source_f = mmap_create_temp(tmp_name_buf, tmp_length);
+
+			do
+			{
+				size_t prev_offset = 0;
+				int failed = 0;
+
+				for (i = 0; i < dh.block_count; ++i)
+				{
+					size_t offset = ntohl(source_blocks[i].offset);
+					size_t length = ntohl(source_blocks[i].length);
+
+					void* in_pos = mmap_read(&source_f, prev_offset,
+							offset - prev_offset);
+					void* out_pos = mmap_read(&temp_source_f,
+							prev_offset, offset - prev_offset);
+
+					if (!in_pos || !out_pos)
+					{
+						failed = 1;
+						break;
+					}
+
+					memcpy(out_pos, in_pos, offset - prev_offset);
+					prev_offset = offset + length;
+				}
+				if (failed)
+					break;
+
+				/* the last block */
+				{
+					void* in_pos = mmap_read(&source_f, prev_offset,
+							source_f.length - prev_offset);
+					void* out_pos = mmap_read(&temp_source_f,
+							prev_offset, source_f.length - prev_offset);
+
+					if (!in_pos || !out_pos)
+					{
+						failed = 1;
+						break;
+					}
+
+					memcpy(out_pos, in_pos, source_f.length - prev_offset);
+				}
+
+				prev_offset = source_f.length;
+				for (i = 0; i < dh.block_count; ++i)
+				{
+					size_t offset = ntohl(source_blocks[i].offset);
+					size_t length = ntohl(source_blocks[i].length);
+					size_t unc_length = ntohl(source_blocks[i].uncompressed_length);
+					size_t ret;
+
+					void* in_pos = mmap_read(&source_f, offset, length);
+					void* out_pos = mmap_read(&temp_source_f,
+							prev_offset, unc_length);
+
+					if (!in_pos || !out_pos)
+					{
+						failed = 1;
+						break;
+					}
+
+					ret = compressor_decompress(sb.compression,
+							out_pos, in_pos, length, unc_length);
+
+					if (ret != unc_length)
+					{
+						if (ret != 0)
+							fprintf(stderr, "Block decompression resulted in different size.\n"
+									"\toffset: 0x%08lx\n"
+									"\tlength: %lu\n"
+									"\texpected unpacked length: %lu\n"
+									"\treal unpacked length: %lu\n",
+									offset, length, unc_length, ret);
+
+						failed = 1;
+						break;
+					}
+
+					prev_offset += unc_length;
+				}
+				if (failed)
+					break;
+
+				/* copy the block lists and the header */
+				{
+					void* in_pos = mmap_read(&patch_f, sizeof(dh),
+							block_list_size);
+					void* out_pos = mmap_read(&temp_source_f,
+							prev_offset, block_list_size);
+					if (!in_pos || !out_pos)
+						break;
+					memcpy(out_pos, in_pos, block_list_size);
+
+					prev_offset += block_list_size;
+					in_pos = mmap_read(&patch_f, 0, sizeof(dh));
+					out_pos = mmap_read(&temp_source_f,
+							prev_offset, sizeof(dh));
+					if (!in_pos || !out_pos)
+						break;
+					memcpy(out_pos, in_pos, sizeof(dh));
+				}
+			} while (0);
+
+			mmap_close(&temp_source_f);
+			unlink(tmp_name_buf);
 		} while (0);
 
 		mmap_close(&patch_f);

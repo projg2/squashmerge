@@ -59,8 +59,51 @@ struct mmap_file mmap_open(const char* path)
 	return out;
 }
 
+struct mmap_file mmap_create_temp(char* path_buf, size_t size)
+{
+	struct mmap_file out;
+
+	out.fd = mkstemp(path_buf);
+	if (out.fd == -1)
+	{
+		fprintf(stderr, "Unable to create a temporary file.\n"
+				"\terrno: %s\n", strerror(errno));
+		return out;
+	}
+
+	if (ftruncate(out.fd, size) == -1)
+	{
+		fprintf(stderr, "Unable to expand the file to requested size.\n"
+				"\tpath: %s\n"
+				"\terrno: %s\n", path_buf, strerror(errno));
+		close(out.fd);
+		out.fd = -1;
+		return out;
+	}
+
+	out.length = size;
+	out.data = mmap(0, out.length, PROT_WRITE, MAP_SHARED, out.fd, 0);
+	if (out.data == MAP_FAILED)
+	{
+		fprintf(stderr, "Unable to mmap() file.\n"
+				"\tpath: %s\n"
+				"\terrno: %s\n", path_buf, strerror(errno));
+		close(out.fd);
+		out.fd = -1;
+		return out;
+	}
+
+	return out;
+}
+
 void mmap_close(struct mmap_file* f)
 {
+	if (msync(f->data, f->length, MS_SYNC) == -1)
+	{
+		fprintf(stderr, "File update failed.\n"
+				"\terrno: %s\n", strerror(errno));
+	}
+
 	if (munmap(f->data, f->length) == -1)
 	{
 		fprintf(stderr, "Unable unmap file.\n"
@@ -85,4 +128,18 @@ void* mmap_read(const struct mmap_file* f, size_t offset, size_t length)
 	}
 
 	return pos + offset;
+}
+
+size_t mmap_write(const struct mmap_file* f, void* data, size_t offset, size_t length)
+{
+	char* pos = f->data;
+
+	if (offset + length > f->length)
+	{
+		fprintf(stderr, "Trying to write past file.\n");
+		return 0;
+	}
+
+	memcpy(pos + offset, data, length);
+	return length;
 }

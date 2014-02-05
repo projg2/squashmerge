@@ -36,3 +36,25 @@ int compressor_init(enum compressor_id c)
 
 	return 1;
 }
+
+size_t compressor_decompress(enum compressor_id c,
+		void* dest, const void* src, size_t length, size_t out_size)
+{
+	switch (c)
+	{
+		case COMP_LZO:
+#ifdef ENABLE_LZO
+		{
+			lzo_uint out_bytes = out_size;
+
+			if (lzo1x_decompress_safe(src, length, dest, &out_bytes, 0) != LZO_E_OK)
+			{
+				fprintf(stderr, "LZO decompression failed (corrupted data?)");
+				return 0;
+			}
+
+			return out_bytes;
+		}
+#endif
+	}
+}

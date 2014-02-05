@@ -19,6 +19,7 @@ struct mmap_file
 };
 
 struct mmap_file mmap_open(const char* path);
+struct mmap_file mmap_create_temp(char* path_buf, size_t size);
 void mmap_close(struct mmap_file* f);
 
 void* mmap_read(const struct mmap_file* f, size_t offset, size_t length);
