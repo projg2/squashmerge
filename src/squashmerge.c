@@ -18,6 +18,7 @@
 #	include <stdint.h>
 #endif
 
+#include "compressor.h"
 #include "util.h"
 
 #pragma pack(push, 1)
@@ -47,12 +48,17 @@ const uint32_t sqdelta_magic = 0x5371ceb4UL;
 const uint32_t squashfs_magic = 0x73717368UL;
 const uint32_t squashfs_magic_be = 0x68737173UL;
 
-int read_squashfs_header(const struct mmap_file* f)
+struct squashfs_header read_squashfs_header(const struct mmap_file* f)
 {
 	struct squashfs_header* h;
+	struct squashfs_header out;
 	uint16_t comp;
 
+	out.magic = 0;
+
 	h = mmap_read(f, 0, sizeof(*h));
+	if (!h)
+		return out;
 
 	if (h->magic == squashfs_magic)
 		comp = h->compression;
@@ -61,42 +67,59 @@ int read_squashfs_header(const struct mmap_file* f)
 	else
 	{
 		fprintf(stderr, "Invalid magic in squashfs input.\n");
-		return 0;
+		return out;
 	}
 
 	switch (comp)
 	{
+		case COMP_LZO:
+			break;
 		default:
 			fprintf(stderr, "Unsupported compression method in squashfs input.\n"
 				"\tcompressor id: %d\n", comp);
-			return 0;
+			return out;
 	}
 
-	return 1;
+	if (!compressor_init(comp))
+		return out;
+
+	out.magic = squashfs_magic;
+	out.compression = comp;
+
+	return out;
 }
 
-size_t read_sqdelta_header(const struct mmap_file* f)
+struct sqdelta_header read_sqdelta_header(const struct mmap_file* f)
 {
 	struct sqdelta_header* h;
+	struct sqdelta_header out;
+
+	out.magic = 0;
 
 	h = mmap_read(f, 0, sizeof(*h));
+	if (!h)
+		return out;
 
 	if (ntohl(h->magic) != sqdelta_magic)
 	{
 		fprintf(stderr, "Incorrect magic in patch file.\n"
 				"\tmagic: %08x, expected: %08x\n",
 				ntohl(h->magic), sqdelta_magic);
-		return 0;
+		return out;
 	}
 
-	if (ntohl(h->flags))
+	out.flags = ntohl(h->flags);
+	if (out.flags)
 	{
 		fprintf(stderr, "Unknown flag enabled in patch file.\n"
 				"\tflags: %08x\n", ntohl(h->flags));
-		return 0;
+		return out;
 	}
 
-	return ntohl(h->block_count);
+	out.block_count = ntohl(h->block_count);
+	out.magic = sqdelta_magic;
+
+	return out;
 }
 
 int main(int argc, char* argv[])
@@ -127,7 +150,9 @@ int main(int argc, char* argv[])
 
 	do
 	{
-		read_squashfs_header(&source_f);
+		struct squashfs_header sb = read_squashfs_header(&source_f);
+		if (sb.magic == 0)
+			break;
 
 		patch_f = mmap_open(patch_file);
 		if (patch_f.fd == -1)
@@ -135,7 +160,9 @@ int main(int argc, char* argv[])
 
 		do
 		{
-			read_sqdelta_header(&patch_f);
+			struct sqdelta_header dh = read_sqdelta_header(&patch_f);
+			if (dh.magic == 0)
+				break;
 		} while (0);
 
 		mmap_close(&patch_f);
