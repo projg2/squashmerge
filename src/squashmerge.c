@@ -24,7 +24,7 @@
 #include "util.h"
 
 #pragma pack(push, 1)
-struct serialized_compressed_block
+struct compressed_block
 {
 	uint32_t offset;
 	uint32_t length;
@@ -122,6 +122,104 @@ struct sqdelta_header read_sqdelta_header(const struct mmap_file* f)
 	out.magic = sqdelta_magic;
 
 	return out;
+}
+
+int expand_input(struct sqdelta_header* dh,
+		struct compressed_block* source_blocks,
+		struct squashfs_header* sb,
+		struct mmap_file* source_f,
+		struct mmap_file* patch_f,
+		struct mmap_file* temp_source_f)
+{
+	size_t prev_offset = 0;
+	size_t i;
+
+	for (i = 0; i < dh->block_count; ++i)
+	{
+		size_t offset = ntohl(source_blocks[i].offset);
+		size_t length = ntohl(source_blocks[i].length);
+
+		void* in_pos = mmap_read(source_f, prev_offset,
+				offset - prev_offset);
+		void* out_pos = mmap_read(temp_source_f,
+				prev_offset, offset - prev_offset);
+
+		if (!in_pos || !out_pos)
+			return 0;
+
+		memcpy(out_pos, in_pos, offset - prev_offset);
+		prev_offset = offset + length;
+	}
+
+	/* the last block */
+	{
+		void* in_pos = mmap_read(source_f, prev_offset,
+				source_f->length - prev_offset);
+		void* out_pos = mmap_read(temp_source_f,
+				prev_offset, source_f->length - prev_offset);
+
+		if (!in_pos || !out_pos)
+			return 0;
+
+		memcpy(out_pos, in_pos, source_f->length - prev_offset);
+	}
+
+	prev_offset = source_f->length;
+	for (i = 0; i < dh->block_count; ++i)
+	{
+		size_t offset = ntohl(source_blocks[i].offset);
+		size_t length = ntohl(source_blocks[i].length);
+		size_t unc_length = ntohl(source_blocks[i].uncompressed_length);
+		size_t ret;
+
+		void* in_pos = mmap_read(source_f, offset, length);
+		void* out_pos = mmap_read(temp_source_f,
+				prev_offset, unc_length);
+
+		if (!in_pos || !out_pos)
+			return 0;
+
+		ret = compressor_decompress(sb->compression,
+				out_pos, in_pos, length, unc_length);
+
+		if (ret != unc_length)
+		{
+			if (ret != 0)
+				fprintf(stderr, "Block decompression resulted in different size.\n"
+						"\toffset: 0x%08lx\n"
+						"\tlength: %lu\n"
+						"\texpected unpacked length: %lu\n"
+						"\treal unpacked length: %lu\n",
+						offset, length, unc_length, ret);
+
+			return 0;
+		}
+
+		prev_offset += unc_length;
+	}
+
+	/* copy the block lists and the header */
+	{
+		size_t block_list_size = sizeof(*source_blocks) * dh->block_count;
+
+		void* in_pos = mmap_read(patch_f, sizeof(*dh),
+				block_list_size);
+		void* out_pos = mmap_read(temp_source_f,
+				prev_offset, block_list_size);
+		if (!in_pos || !out_pos)
+			return 0;
+
+		memcpy(out_pos, in_pos, block_list_size);
+
+		prev_offset += block_list_size;
+		in_pos = mmap_read(patch_f, 0, sizeof(*dh));
+		out_pos = mmap_read(temp_source_f, prev_offset, sizeof(*dh));
+		if (!in_pos || !out_pos)
+			return 0;
+		memcpy(out_pos, in_pos, sizeof(*dh));
+	}
+
+	return 1;
 }
 
 int run_xdelta3(struct mmap_file* patch, struct mmap_file* output,
@@ -228,8 +326,7 @@ int main(int argc, char* argv[])
 
 		do
 		{
-			struct serialized_compressed_block* source_blocks;
-			size_t i;
+			struct compressed_block* source_blocks;
 			char tmp_name_buf[] = "tmp.XXXXXX";
 			size_t tmp_length = 0;
 			size_t block_list_size;
@@ -250,6 +347,8 @@ int main(int argc, char* argv[])
 
 			do
 			{
+				size_t i;
+
 				{
 					const char* tmpdir = getenv("TMPDIR");
 #ifdef _P_tmpdir
@@ -284,108 +383,9 @@ int main(int argc, char* argv[])
 
 				do
 				{
-					do
-					{
-						size_t prev_offset = 0;
-						int failed = 0;
-
-						for (i = 0; i < dh.block_count; ++i)
-						{
-							size_t offset = ntohl(source_blocks[i].offset);
-							size_t length = ntohl(source_blocks[i].length);
-
-							void* in_pos = mmap_read(&source_f, prev_offset,
-									offset - prev_offset);
-							void* out_pos = mmap_read(&temp_source_f,
-									prev_offset, offset - prev_offset);
-
-							if (!in_pos || !out_pos)
-							{
-								failed = 1;
-								break;
-							}
-
-							memcpy(out_pos, in_pos, offset - prev_offset);
-							prev_offset = offset + length;
-						}
-						if (failed)
-							break;
-
-						/* the last block */
-						{
-							void* in_pos = mmap_read(&source_f, prev_offset,
-									source_f.length - prev_offset);
-							void* out_pos = mmap_read(&temp_source_f,
-									prev_offset, source_f.length - prev_offset);
-
-							if (!in_pos || !out_pos)
-							{
-								failed = 1;
-								break;
-							}
-
-							memcpy(out_pos, in_pos, source_f.length - prev_offset);
-						}
-
-						prev_offset = source_f.length;
-						for (i = 0; i < dh.block_count; ++i)
-						{
-							size_t offset = ntohl(source_blocks[i].offset);
-							size_t length = ntohl(source_blocks[i].length);
-							size_t unc_length = ntohl(source_blocks[i].uncompressed_length);
-							size_t ret;
-
-							void* in_pos = mmap_read(&source_f, offset, length);
-							void* out_pos = mmap_read(&temp_source_f,
-									prev_offset, unc_length);
-
-							if (!in_pos || !out_pos)
-							{
-								failed = 1;
-								break;
-							}
-
-							ret = compressor_decompress(sb.compression,
-									out_pos, in_pos, length, unc_length);
-
-							if (ret != unc_length)
-							{
-								if (ret != 0)
-									fprintf(stderr, "Block decompression resulted in different size.\n"
-											"\toffset: 0x%08lx\n"
-											"\tlength: %lu\n"
-											"\texpected unpacked length: %lu\n"
-											"\treal unpacked length: %lu\n",
-											offset, length, unc_length, ret);
-
-								failed = 1;
-								break;
-							}
-
-							prev_offset += unc_length;
-						}
-						if (failed)
-							break;
-
-						/* copy the block lists and the header */
-						{
-							void* in_pos = mmap_read(&patch_f, sizeof(dh),
-									block_list_size);
-							void* out_pos = mmap_read(&temp_source_f,
-									prev_offset, block_list_size);
-							if (!in_pos || !out_pos)
-								break;
-							memcpy(out_pos, in_pos, block_list_size);
-
-							prev_offset += block_list_size;
-							in_pos = mmap_read(&patch_f, 0, sizeof(dh));
-							out_pos = mmap_read(&temp_source_f,
-									prev_offset, sizeof(dh));
-							if (!in_pos || !out_pos)
-								break;
-							memcpy(out_pos, in_pos, sizeof(dh));
-						}
-					} while (0);
+					if (!expand_input(&dh, source_blocks, &sb,
+								&source_f, &patch_f, &temp_source_f))
+						break;
 
 					mmap_close(&temp_source_f);
 
@@ -398,7 +398,8 @@ int main(int argc, char* argv[])
 					}
 
 					/* run xdelta3 to obtain the expanded target file */
-					run_xdelta3(&patch_f, &target_f, tmp_name_buf);
+					if (!run_xdelta3(&patch_f, &target_f, tmp_name_buf))
+						break;
 				} while (0);
 
 				unlink(tmp_name_buf);
