@@ -91,14 +91,15 @@ struct squashfs_header read_squashfs_header(const struct mmap_file* f)
 	return out;
 }
 
-struct sqdelta_header read_sqdelta_header(const struct mmap_file* f)
+struct sqdelta_header read_sqdelta_header(const struct mmap_file* f,
+		size_t offset)
 {
 	struct sqdelta_header* h;
 	struct sqdelta_header out;
 
 	out.magic = 0;
 
-	h = mmap_read(f, 0, sizeof(*h));
+	h = mmap_read(f, offset, sizeof(*h));
 	if (!h)
 		return out;
 
@@ -287,6 +288,73 @@ int run_xdelta3(struct mmap_file* patch, struct mmap_file* output,
 	return 1;
 }
 
+int squash_target_file(struct mmap_file* target_f)
+{
+	struct sqdelta_header dh;
+	size_t block_list_size, block_list_offset;
+	struct compressed_block* target_blocks;
+	size_t prev_offset;
+	size_t i;
+
+	dh = read_sqdelta_header(target_f, target_f->length - sizeof(dh));
+
+	if (dh.magic == 0)
+		return 0;
+	block_list_size = sizeof(*target_blocks) * dh.block_count;
+	block_list_offset = target_f->length - sizeof(dh) - block_list_size;
+
+	target_blocks = mmap_read(target_f, block_list_offset,
+			block_list_size);
+	if (!target_blocks)
+		return 0;
+
+	prev_offset = block_list_offset;
+
+	for (i = dh.block_count; i > 0; --i)
+	{
+		size_t offset = ntohl(target_blocks[i - 1].offset);
+		size_t length = ntohl(target_blocks[i - 1].length);
+		size_t unc_length = ntohl(target_blocks[i - 1].uncompressed_length);
+		size_t ret;
+
+		void* in_pos;
+		void* out_pos = mmap_read(target_f, offset, length);
+
+		prev_offset -= unc_length;
+		in_pos = mmap_read(target_f, prev_offset, unc_length);
+		if (!in_pos || !out_pos)
+			return 0;
+
+#if 0
+		ret = compressor_decompress(sb->compression,
+				out_pos, in_pos, length, unc_length);
+
+		if (ret != unc_length)
+		{
+			if (ret != 0)
+				fprintf(stderr, "Block decompression resulted in different size.\n"
+						"\toffset: 0x%08lx\n"
+						"\tlength: %lu\n"
+						"\texpected unpacked length: %lu\n"
+						"\treal unpacked length: %lu\n",
+						offset, length, unc_length, ret);
+
+			return 0;
+		}
+#endif
+	}
+
+	/* truncate the resulting file */
+	if (ftruncate(target_f->fd, prev_offset) == -1)
+	{
+		fprintf(stderr, "Unable to truncate output file.\n"
+				"\terrno: %s\n", strerror(errno));
+		return 0;
+	}
+
+	return 1;
+}
+
 int main(int argc, char* argv[])
 {
 	const char* source_file;
@@ -331,12 +399,13 @@ int main(int argc, char* argv[])
 			size_t tmp_length = 0;
 			size_t block_list_size;
 
-			struct sqdelta_header dh = read_sqdelta_header(&patch_f);
+			struct sqdelta_header dh = read_sqdelta_header(&patch_f, 0);
 			if (dh.magic == 0)
 				break;
 
+			block_list_size = sizeof(*source_blocks) * dh.block_count;
 			source_blocks = mmap_read(&patch_f, sizeof(dh),
-					sizeof(*source_blocks) * dh.block_count);
+					block_list_size);
 			if (!source_blocks)
 				break;
 
@@ -366,8 +435,6 @@ int main(int argc, char* argv[])
 						break;
 					}
 				}
-
-				block_list_size = sizeof(*source_blocks) * dh.block_count;
 
 				tmp_length += source_f.length;
 				tmp_length += sizeof(dh);
@@ -400,6 +467,11 @@ int main(int argc, char* argv[])
 					/* run xdelta3 to obtain the expanded target file */
 					if (!run_xdelta3(&patch_f, &target_f, tmp_name_buf))
 						break;
+
+					if (!mmap_map_created_file(&target_f))
+						break;
+
+					squash_target_file(&target_f);
 				} while (0);
 
 				unlink(tmp_name_buf);

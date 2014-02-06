@@ -114,6 +114,32 @@ struct mmap_file mmap_create_without_mapping(const char* path)
 	return out;
 }
 
+int mmap_map_created_file(struct mmap_file* f)
+{
+	off_t length;
+
+	length = lseek(f->fd, 0, SEEK_END);
+	if (length == -1)
+	{
+		fprintf(stderr, "Unable to seek just-written file (is it a regular file?).\n"
+				"\terrno: %s\n", strerror(errno));
+		return 0;
+	}
+
+	f->length = length;
+	f->data = mmap(0, f->length, PROT_READ|PROT_WRITE, MAP_SHARED,
+			f->fd, 0);
+	if (f->data == MAP_FAILED)
+	{
+		fprintf(stderr, "Unable to mmap() just-written file.\n"
+				"\terrno: %s\n", strerror(errno));
+		f->data = 0;
+		return 0;
+	}
+
+	return 1;
+}
+
 void mmap_close(struct mmap_file* f)
 {
 	if (f->data)
