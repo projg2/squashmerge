@@ -5,8 +5,9 @@ squashmerge_SOURCES = \
 	src/squashmerge.c \
 	src/util.c
 
-squashmerge_CPPFLAGS = \
+squashmerge_CPPFLAGS = -pthread \
 	$(LZO_CFLAGS)
+squashmerge_LDFLAGS = -pthread
 squashmerge_LDADD = \
 	$(LZO_LIBS)
 
