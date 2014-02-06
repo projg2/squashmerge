@@ -80,6 +80,155 @@ struct sqdelta_header read_sqdelta_header(const struct mmap_file* f,
 	return out;
 }
 
+struct compress_data_shared
+{
+	struct sqdelta_header* dh;
+	struct compressed_block* block_list;
+	struct mmap_file* input_f;
+	struct mmap_file* output_f;
+	size_t* prev_offset;
+	int thread_count;
+};
+
+struct compress_data_private
+{
+	struct compress_data_shared* shared;
+	int thread_no;
+	pthread_t thread_id;
+};
+
+int run_multithreaded(void* (*func) (void*), struct compress_data_shared* d)
+{
+	struct compress_data_private* pd;
+	int i, spawned, ret;
+
+	int num_cpus = 1;
+
+#ifdef _SC_NPROCESSORS_ONLN
+	num_cpus = sysconf(_SC_NPROCESSORS_ONLN);
+	if (num_cpus < 1)
+	{
+		fprintf(stderr, "Warning: unable to get number of CPUs.\n");
+		num_cpus = 1;
+	}
+#endif
+
+	d->thread_count = num_cpus;
+
+	pd = calloc(num_cpus, sizeof(*pd));
+	if (!pd)
+	{
+		fprintf(stderr, "Unable to allocate memory for threading.\n"
+				"\terrno: %s\n", strerror(errno));
+		return 0;
+	}
+
+	for (i = 0; i < num_cpus; ++i)
+	{
+		pd[i].shared = d;
+		pd[i].thread_no = i;
+
+		ret = pthread_create(&pd[i].thread_id, 0, func, &pd[i]);
+		if (ret != 0)
+		{
+			fprintf(stderr, "Unable to create thread %d.\n"
+					"\terror: %s\n", i, strerror(ret));
+			break;
+		}
+	}
+	spawned = i;
+
+	if (ret != 0)
+	{
+		int cret;
+
+		for (i = 0; i < spawned; ++i)
+		{
+			cret = pthread_cancel(pd[i].thread_id);
+			if (cret != 0)
+				fprintf(stderr, "Warning: unable to cancel thread %d.\n"
+						"\terror: %s\n", i, strerror(cret));
+		}
+	}
+
+	for (i = 0; i < spawned; ++i)
+	{
+		int jret;
+		void* res;
+
+		jret = pthread_join(pd[i].thread_id, &res);
+		if (jret != 0)
+		{
+			fprintf(stderr, "Warning: unable to join thread %d.\n"
+					"\terror: %s\n", i, strerror(jret));
+		}
+
+		if (!res)
+			ret = 1;
+	}
+
+	free(pd);
+
+	return !ret;
+}
+
+void* decompress_blocks(void* data)
+{
+	struct compress_data_private* pd = data;
+
+	struct sqdelta_header* dh = pd->shared->dh;
+	struct compressed_block* source_blocks = pd->shared->block_list;
+	struct mmap_file* source_f = pd->shared->input_f;
+	struct mmap_file* temp_source_f = pd->shared->output_f;
+	size_t prev_offset = *pd->shared->prev_offset;
+	int id = pd->thread_no;
+	int no_threads = pd->shared->thread_count;
+
+	size_t i;
+
+	for (i = 0; i < dh->block_count; ++i)
+	{
+		size_t unc_length = ntohl(source_blocks[i].uncompressed_length);
+
+		if (i % no_threads == id)
+		{
+			size_t offset = ntohl(source_blocks[i].offset);
+			size_t length = ntohl(source_blocks[i].length);
+			size_t ret;
+
+			void* in_pos = mmap_read(source_f, offset, length);
+			void* out_pos = mmap_read(temp_source_f,
+					prev_offset, unc_length);
+
+			if (!in_pos || !out_pos)
+				return 0;
+
+			ret = compressor_decompress(dh->compression,
+					out_pos, in_pos, length, unc_length);
+
+			if (ret != unc_length)
+			{
+				if (ret != 0)
+					fprintf(stderr, "Block decompression resulted in different size.\n"
+							"\toffset: 0x%08lx\n"
+							"\tlength: %lu\n"
+							"\texpected unpacked length: %lu\n"
+							"\treal unpacked length: %lu\n",
+							offset, length, unc_length, ret);
+
+				return 0;
+			}
+		}
+
+		prev_offset += unc_length;
+	}
+
+	if (id == 0)
+		*pd->shared->prev_offset = prev_offset;
+
+	return pd;
+}
+
 int expand_input(struct sqdelta_header* dh,
 		struct compressed_block* source_blocks,
 		struct mmap_file* source_f,
@@ -120,37 +269,18 @@ int expand_input(struct sqdelta_header* dh,
 	}
 
 	prev_offset = source_f->length;
-	for (i = 0; i < dh->block_count; ++i)
+
 	{
-		size_t offset = ntohl(source_blocks[i].offset);
-		size_t length = ntohl(source_blocks[i].length);
-		size_t unc_length = ntohl(source_blocks[i].uncompressed_length);
-		size_t ret;
+		struct compress_data_shared d;
 
-		void* in_pos = mmap_read(source_f, offset, length);
-		void* out_pos = mmap_read(temp_source_f,
-				prev_offset, unc_length);
+		d.dh = dh;
+		d.block_list = source_blocks;
+		d.input_f = source_f;
+		d.output_f = temp_source_f;
+		d.prev_offset = &prev_offset;
 
-		if (!in_pos || !out_pos)
+		if (!run_multithreaded(decompress_blocks, &d))
 			return 0;
-
-		ret = compressor_decompress(dh->compression,
-				out_pos, in_pos, length, unc_length);
-
-		if (ret != unc_length)
-		{
-			if (ret != 0)
-				fprintf(stderr, "Block decompression resulted in different size.\n"
-						"\toffset: 0x%08lx\n"
-						"\tlength: %lu\n"
-						"\texpected unpacked length: %lu\n"
-						"\treal unpacked length: %lu\n",
-						offset, length, unc_length, ret);
-
-			return 0;
-		}
-
-		prev_offset += unc_length;
 	}
 
 	/* copy the block lists and the header */
@@ -242,29 +372,13 @@ int run_xdelta3(struct mmap_file* patch, struct mmap_file* output,
 	return 1;
 }
 
-struct compress_data_shared
-{
-	struct sqdelta_header* dh;
-	struct compressed_block* target_blocks;
-	struct mmap_file* target_f;
-	size_t* prev_offset;
-	int thread_count;
-};
-
-struct compress_data_private
-{
-	struct compress_data_shared* shared;
-	int thread_no;
-	pthread_t thread_id;
-};
-
-void* compress_block(void* data)
+void* compress_blocks(void* data)
 {
 	struct compress_data_private* pd = data;
 
 	struct sqdelta_header* dh = pd->shared->dh;
-	struct compressed_block* target_blocks = pd->shared->target_blocks;
-	struct mmap_file* target_f = pd->shared->target_f;
+	struct compressed_block* target_blocks = pd->shared->block_list;
+	struct mmap_file* target_f = pd->shared->output_f;
 	size_t prev_offset = *pd->shared->prev_offset;
 	int id = pd->thread_no;
 	int no_threads = pd->shared->thread_count;
@@ -308,7 +422,7 @@ void* compress_block(void* data)
 		}
 	}
 
-	if (i == 0)
+	if (id == 0)
 		*pd->shared->prev_offset = prev_offset;
 
 	return pd;
@@ -320,7 +434,6 @@ int squash_target_file(struct mmap_file* target_f)
 	size_t block_list_size, block_list_offset;
 	struct compressed_block* target_blocks;
 	size_t prev_offset;
-	int num_cpus = 1;
 
 	dh = read_sqdelta_header(target_f, target_f->length - sizeof(dh));
 
@@ -336,81 +449,15 @@ int squash_target_file(struct mmap_file* target_f)
 
 	prev_offset = block_list_offset;
 
-#ifdef _SC_NPROCESSORS_ONLN
-	num_cpus = sysconf(_SC_NPROCESSORS_ONLN);
-	if (num_cpus < 1)
-	{
-		fprintf(stderr, "Warning: unable to get number of CPUs.\n");
-		num_cpus = 1;
-	}
-#endif
-
 	{
 		struct compress_data_shared d;
-		struct compress_data_private* pd;
-		int i, spawned, ret;
 
 		d.dh = &dh;
-		d.target_blocks = target_blocks;
-		d.target_f = target_f;
+		d.block_list = target_blocks;
+		d.output_f = target_f;
 		d.prev_offset = &prev_offset;
-		d.thread_count = num_cpus;
 
-		pd = calloc(num_cpus, sizeof(*pd));
-		if (!pd)
-		{
-			fprintf(stderr, "Unable to allocate memory for threading.\n"
-					"\terrno: %s\n", strerror(errno));
-			return 0;
-		}
-
-		for (i = 0; i < num_cpus; ++i)
-		{
-			pd[i].shared = &d;
-			pd[i].thread_no = i;
-
-			ret = pthread_create(&pd[i].thread_id, 0, compress_block, &pd[i]);
-			if (ret != 0)
-			{
-				fprintf(stderr, "Unable to create thread %d.\n"
-						"\terror: %s\n", i, strerror(ret));
-				break;
-			}
-		}
-		spawned = i;
-
-		if (ret != 0)
-		{
-			int cret;
-
-			for (i = 0; i < spawned; ++i)
-			{
-				cret = pthread_cancel(pd[i].thread_id);
-				if (cret != 0)
-					fprintf(stderr, "Warning: unable to cancel thread %d.\n"
-							"\terror: %s\n", i, strerror(cret));
-			}
-		}
-
-		for (i = 0; i < spawned; ++i)
-		{
-			int jret;
-			void* res;
-
-			jret = pthread_join(pd[i].thread_id, &res);
-			if (jret != 0)
-			{
-				fprintf(stderr, "Warning: unable to join thread %d.\n"
-						"\terror: %s\n", i, strerror(jret));
-			}
-
-			if (!res)
-				ret = 1;
-		}
-
-		free(pd);
-
-		if (ret)
+		if (!run_multithreaded(compress_blocks, &d))
 			return 0;
 	}
 
