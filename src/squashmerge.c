@@ -35,61 +35,12 @@ struct sqdelta_header
 {
 	uint32_t magic;
 	uint32_t flags;
+	uint32_t compression;
 	uint32_t block_count;
-};
-
-struct squashfs_header
-{
-	uint32_t magic;
-	uint32_t unused[4];
-	uint16_t compression;
 };
 #pragma pack(pop)
 
 const uint32_t sqdelta_magic = 0x5371ceb4UL;
-const uint32_t squashfs_magic = 0x73717368UL;
-const uint32_t squashfs_magic_be = 0x68737173UL;
-
-struct squashfs_header read_squashfs_header(const struct mmap_file* f)
-{
-	struct squashfs_header* h;
-	struct squashfs_header out;
-	uint16_t comp;
-
-	out.magic = 0;
-
-	h = mmap_read(f, 0, sizeof(*h));
-	if (!h)
-		return out;
-
-	if (h->magic == squashfs_magic)
-		comp = h->compression;
-	else if (h->magic == squashfs_magic_be)
-		comp = h->compression << 8 | h->compression >> 8;
-	else
-	{
-		fprintf(stderr, "Invalid magic in squashfs input.\n");
-		return out;
-	}
-
-	switch (comp)
-	{
-		case COMP_LZO:
-			break;
-		default:
-			fprintf(stderr, "Unsupported compression method in squashfs input.\n"
-				"\tcompressor id: %d\n", comp);
-			return out;
-	}
-
-	if (!compressor_init(comp))
-		return out;
-
-	out.magic = squashfs_magic;
-	out.compression = comp;
-
-	return out;
-}
 
 struct sqdelta_header read_sqdelta_header(const struct mmap_file* f,
 		size_t offset)
@@ -119,6 +70,7 @@ struct sqdelta_header read_sqdelta_header(const struct mmap_file* f,
 		return out;
 	}
 
+	out.compression = ntohl(h->compression);
 	out.block_count = ntohl(h->block_count);
 	out.magic = sqdelta_magic;
 
@@ -127,7 +79,6 @@ struct sqdelta_header read_sqdelta_header(const struct mmap_file* f,
 
 int expand_input(struct sqdelta_header* dh,
 		struct compressed_block* source_blocks,
-		struct squashfs_header* sb,
 		struct mmap_file* source_f,
 		struct mmap_file* patch_f,
 		struct mmap_file* temp_source_f)
@@ -180,7 +131,7 @@ int expand_input(struct sqdelta_header* dh,
 		if (!in_pos || !out_pos)
 			return 0;
 
-		ret = compressor_decompress(sb->compression,
+		ret = compressor_decompress(dh->compression,
 				out_pos, in_pos, length, unc_length);
 
 		if (ret != unc_length)
@@ -325,23 +276,21 @@ int squash_target_file(struct mmap_file* target_f)
 		if (!in_pos || !out_pos)
 			return 0;
 
-#if 0
-		ret = compressor_decompress(sb->compression,
-				out_pos, in_pos, length, unc_length);
+		ret = compressor_compress(dh.compression,
+				out_pos, in_pos, unc_length, length);
 
-		if (ret != unc_length)
+		if (ret != length)
 		{
 			if (ret != 0)
-				fprintf(stderr, "Block decompression resulted in different size.\n"
+				fprintf(stderr, "Block re-compression resulted in different size.\n"
 						"\toffset: 0x%08lx\n"
-						"\tlength: %lu\n"
-						"\texpected unpacked length: %lu\n"
-						"\treal unpacked length: %lu\n",
-						offset, length, unc_length, ret);
+						"\tinput length: %lu\n"
+						"\texpected packed length: %lu\n"
+						"\treal packed length: %lu\n",
+						offset, unc_length, length, ret);
 
 			return 0;
 		}
-#endif
 	}
 
 	/* truncate the resulting file */
@@ -384,10 +333,6 @@ int main(int argc, char* argv[])
 
 	do
 	{
-		struct squashfs_header sb = read_squashfs_header(&source_f);
-		if (sb.magic == 0)
-			break;
-
 		patch_f = mmap_open(patch_file);
 		if (patch_f.fd == -1)
 			break;
@@ -450,7 +395,7 @@ int main(int argc, char* argv[])
 
 				do
 				{
-					if (!expand_input(&dh, source_blocks, &sb,
+					if (!expand_input(&dh, source_blocks,
 								&source_f, &patch_f, &temp_source_f))
 						break;
 
