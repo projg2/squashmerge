@@ -128,13 +128,18 @@ int run_multithreaded(void* (*func) (void*), struct compress_data_shared* d)
 		pd[i].shared = d;
 		pd[i].thread_no = i;
 
-		ret = pthread_create(&pd[i].thread_id, 0, func, &pd[i]);
-		if (ret != 0)
+		if (i != num_cpus - 1)
 		{
-			fprintf(stderr, "Unable to create thread %d.\n"
-					"\terror: %s\n", i, strerror(ret));
-			break;
+			ret = pthread_create(&pd[i].thread_id, 0, func, &pd[i]);
+			if (ret != 0)
+			{
+				fprintf(stderr, "Unable to create thread %d.\n"
+						"\terror: %s\n", i, strerror(ret));
+				break;
+			}
 		}
+		else
+			ret = !func(&pd[i]);
 	}
 	spawned = i;
 
@@ -144,6 +149,9 @@ int run_multithreaded(void* (*func) (void*), struct compress_data_shared* d)
 
 		for (i = 0; i < spawned; ++i)
 		{
+			if (i == num_cpus - 1)
+				break;
+
 			cret = pthread_cancel(pd[i].thread_id);
 			if (cret != 0)
 				fprintf(stderr, "Warning: unable to cancel thread %d.\n"
@@ -155,6 +163,9 @@ int run_multithreaded(void* (*func) (void*), struct compress_data_shared* d)
 	{
 		int jret;
 		void* res;
+
+		if (i == num_cpus - 1)
+			break;
 
 		jret = pthread_join(pd[i].thread_id, &res);
 		if (jret != 0)
