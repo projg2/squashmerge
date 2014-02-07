@@ -93,7 +93,7 @@ struct compress_data_shared
 struct compress_data_private
 {
 	struct compress_data_shared* shared;
-	int thread_no;
+	unsigned int thread_no;
 	pthread_t thread_id;
 };
 
@@ -192,7 +192,7 @@ void* decompress_blocks(void* data)
 	struct mmap_file* source_f = pd->shared->input_f;
 	struct mmap_file* temp_source_f = pd->shared->output_f;
 	size_t prev_offset = *pd->shared->prev_offset;
-	int id = pd->thread_no;
+	unsigned int id = pd->thread_no;
 	int no_threads = pd->shared->thread_count;
 
 	size_t i;
@@ -391,7 +391,7 @@ void* compress_blocks(void* data)
 	struct compressed_block* target_blocks = pd->shared->block_list;
 	struct mmap_file* target_f = pd->shared->output_f;
 	size_t prev_offset = *pd->shared->prev_offset;
-	int id = pd->thread_no;
+	unsigned int id = pd->thread_no;
 	int no_threads = pd->shared->thread_count;
 
 	size_t i;
