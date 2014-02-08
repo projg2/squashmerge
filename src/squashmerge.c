@@ -80,6 +80,31 @@ struct sqdelta_header read_sqdelta_header(const struct mmap_file* f,
 	return out;
 }
 
+enum patch_format
+{
+	PATCH_UNKNOWN = 0,
+
+	PATCH_VCDIFF,
+};
+
+const unsigned char vcdiff_magic[3] = {0xd6, 0xc3, 0xc4};
+
+int read_patch_format(const struct mmap_file* f, size_t offset)
+{
+	unsigned char* hdr;
+
+	hdr = mmap_read(f, offset, sizeof(vcdiff_magic));
+	if (!hdr)
+		return PATCH_UNKNOWN;
+
+	if (!memcmp(hdr, vcdiff_magic, sizeof(vcdiff_magic)))
+		return PATCH_VCDIFF;
+
+	fprintf(stderr, "Unknown delta format (only vcdiff"
+			" is supported at the moment).\n");
+	return PATCH_UNKNOWN;
+}
+
 struct compress_data_shared
 {
 	struct sqdelta_header* dh;
@@ -522,6 +547,7 @@ int main(int argc, char* argv[])
 			char tmp_name_buf[] = "tmp.XXXXXX";
 			size_t tmp_length = 0;
 			size_t block_list_size;
+			enum patch_format pformat;
 
 			struct sqdelta_header dh = read_sqdelta_header(&patch_f, 0);
 			if (dh.magic == 0)
@@ -531,6 +557,11 @@ int main(int argc, char* argv[])
 			source_blocks = mmap_read(&patch_f, sizeof(dh),
 					block_list_size);
 			if (!source_blocks)
+				break;
+
+			pformat = read_patch_format(&patch_f,
+					sizeof(dh) + block_list_size);
+			if (pformat == PATCH_UNKNOWN)
 				break;
 
 			/* open target before chdir() */
@@ -574,6 +605,8 @@ int main(int argc, char* argv[])
 
 				do
 				{
+					int patch_ret;
+
 					if (!expand_input(&dh, source_blocks,
 								&source_f, &patch_f, &temp_source_f))
 						break;
@@ -588,8 +621,18 @@ int main(int argc, char* argv[])
 						break;
 					}
 
-					/* run xdelta3 to obtain the expanded target file */
-					if (!run_xdelta3(&patch_f, &target_f, tmp_name_buf))
+					/* run patcher to obtain the expanded target file */
+					switch (pformat)
+					{
+						case PATCH_VCDIFF:
+							patch_ret = run_xdelta3(&patch_f, &target_f, tmp_name_buf);
+							break;
+						case PATCH_UNKNOWN:
+							/* not reached */
+							patch_ret = 0;
+					}
+
+					if (!patch_ret)
 						break;
 
 					if (!mmap_map_created_file(&target_f))
