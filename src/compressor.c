@@ -13,12 +13,17 @@
 #ifdef ENABLE_LZO
 #	include <lzo/lzo1x.h>
 #endif
+#ifdef ENABLE_LZ4
+#	include <lz4.h>
+#	include <lz4hc.h>
+#endif
 
 #include "compressor.h"
 
 enum compressor_id
 {
 	COMP_ID_LZO = 0x01 << 24,
+	COMP_ID_LZ4 = 0x02 << 24,
 	COMP_ID_MASK = 0xff << 24
 };
 
@@ -31,6 +36,16 @@ enum lzo_options
 	COMP_LZO_OPTIMIZED = 0x10,
 	COMP_LZO_KNOWN_FLAG_MASK = COMP_LZO_OPTIMIZED,
 	COMP_LZO_FLAG_MASK = 0xfffff0
+};
+#endif
+
+#ifdef ENABLE_LZ4
+enum lz4_options
+{
+	COMP_LZ4_HC = 0x01,
+
+	COMP_LZ4_KNOWN_FLAG_MASK = COMP_LZ4_HC,
+	COMP_LZ4_FLAG_MASK = 0xffffff
 };
 #endif
 
@@ -62,6 +77,19 @@ int compressor_init(uint32_t c)
 			}
 #else
 			fprintf(stderr, "LZO support disabled at build time\n");
+			return 0;
+#endif
+			break;
+		case COMP_ID_LZ4:
+#ifdef ENABLE_LZO
+			if (((c & COMP_LZ4_FLAG_MASK) & ~COMP_LZ4_KNOWN_FLAG_MASK) != 0)
+			{
+				fprintf(stderr, "Unknown LZ4 flags enabled: %08x\n",
+						c & COMP_LZ4_FLAG_MASK);
+				return 0;
+			}
+#else
+			fprintf(stderr, "LZ4 support disabled at build time\n");
 			return 0;
 #endif
 			break;
@@ -112,6 +140,25 @@ size_t compressor_compress(uint32_t c,
 			return out_bytes;
 		}
 #endif
+		case COMP_ID_LZ4:
+#ifdef ENABLE_LZ4
+		{
+			int out_bytes;
+
+			if (c & COMP_LZ4_HC)
+				out_bytes = LZ4_compressHC_limitedOutput(src, dest, length, out_size);
+			else
+				out_bytes = LZ4_compress_limitedOutput(src, dest, length, out_size);
+
+			if (out_bytes < 0)
+			{
+				fprintf(stderr, "LZ4 compression failed\n");
+				return 0;
+			}
+
+			return out_bytes;
+		}
+#endif
 	}
 
 	return 0;
@@ -129,6 +176,22 @@ size_t compressor_decompress(uint32_t c,
 			if (lzo1x_decompress_safe(src, length, dest, &out_bytes, 0) != LZO_E_OK)
 			{
 				fprintf(stderr, "LZO decompression failed (corrupted data?)\n");
+				return 0;
+			}
+
+			return out_bytes;
+		}
+#endif
+		case COMP_ID_LZ4:
+#ifdef ENABLE_LZ4
+		{
+			int out_bytes;
+
+			out_bytes = LZ4_decompress_safe(src, dest, length, out_size);
+
+			if (out_bytes < 0)
+			{
+				fprintf(stderr, "LZ4 decompression failed (corrupted data?)\n");
 				return 0;
 			}
 
