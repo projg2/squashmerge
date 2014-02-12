@@ -638,7 +638,8 @@ int main(int argc, char* argv[])
 					if (!mmap_map_created_file(&target_f))
 						break;
 
-					squash_target_file(&target_f);
+					if (squash_target_file(&target_f))
+						ret = 0;
 				} while (0);
 
 				unlink(tmp_name_buf);
