@@ -1,0 +1,272 @@
+================================
+SquashDelta format specification
+================================
+
+:Authors: Michał Górny
+:Version: 0.1
+:Date: 14 Feb 2014
+
+
+Overview
+--------
+
+Compressed file formats like SquashFS are not handled efficiently
+by binary delta tools such as xdelta3. The non-linearity of mapping
+between uncompressed input and compressed data can result in relatively
+large deltas due to small changes in input.
+
+The SquashDelta format aims to improve the efficiency of binary deltas
+through passing the underlying uncompressed data to the delta tool,
+and compressing the output back as desired. It achieves the best
+efficiency with input consisting of multiple separate compressed blocks
+such as SquashFS since it does not need to recompress the unchanged
+blocks.
+
+
+The delta process
+-----------------
+
+The delta generation is performed by tool such as squashdelta_. The tool
+analyzes the given input files (the old and new version of file)
+and chooses the blocks to uncompress. Afterwards, it creates
+the *expanded input files*, that is files with selected blocks
+uncompressed.
+
+The expanded input files are used to generate the actual delta using
+an external tool such as xdelta3. The resulting delta along with
+block list comprise the SquashDelta file as detailed below.
+
+The file reconstruction process is performed by tool such as
+squashmerge_. The tool reads block list from the SquashDelta file
+and uses it to convert the old file into the expanded version.
+The delta is used to reconstruct the expanded new file. Afterwards,
+the tool compresses all expanded blocks back obtaining the new file
+in its original form.
+
+For the process to succeed, it is absolutely necessary
+that the compression algorithm used to apply deltas is fully
+deterministic and compatible with the one used to generate original
+input files.
+
+.. _squashdelta: https://bitbucket.org/mgorny/squashdelta
+.. _squashmerge: https://bitbucket.org/mgorny/squashmerge
+
+
+Format details
+--------------
+
+Expanded input file
+~~~~~~~~~~~~~~~~~~~
+
+The expanded input file is the intermediate file that is used
+by SquashDelta to generate and apply the patch. The file is composed
+of the following segments:
+
+    +-------------------+-----------------------+---------+--------+
+    |  input file data  |  uncompressed blocks  | b. list | header |
+    +-------------------+-----------------------+---------+--------+
+
+The input file data is the verbatim copy of the input file, except for
+the blocks queued for decompression. Those blocks are replaced by sparse
+blocks (blocks of NUL bytes) that can be efficiently stored in sparse
+file or compressed.
+
+The uncompressed block part contains the uncompressed data from blocks
+queued for decompression. The blocks are stored sequentially, with no
+delimiters. The offset into each block can be obtained as sum
+of preceding block sizes.
+
+The block list part contains the list of blocks queued
+for decompression. The list stores block offsets, compressed
+and uncompressed sizes. The block list format is explained in a separate
+section.
+
+The header part contains the SquashDelta format header. It is explained
+in a separate section.
+
+
+SquashDelta patch
+~~~~~~~~~~~~~~~~~
+
+The SquashDelta patch (delta) file is composed of the following
+segments:
+
+    +--------+---------+------------------+
+    | header | b. list |    patch data    |
+    +--------+---------+------------------+
+
+The header part contains the SquashDelta format header. It is explained
+in a separate section.
+
+The block list contains the list of blocks queued for decompression
+in the input file. It is used to reconstruct the expanded input file.
+The list format is explained in a separate section.
+
+The patch data segment contains the delta between expanded input files.
+The patch format is specific to the delta tool used, and it is
+recognized by the tool-specific magic bytes. Currently, only xdelta3
+patches are supported.
+
+
+SquashDelta header
+~~~~~~~~~~~~~~~~~~
+
+The SquashDelta header is used to identify both expanded input files
+and SquashDelta patches. The bits in the header are laid out as:
+
+    +----+----------------+---+
+    | 31 |      ...       | 0 |
+    +====+================+===+
+    |       magic bytes       |
+    +-------------------------+
+    |          flags          |
+    +-------------------------+
+    |       compression       |
+    +-------------------------+
+    |       block count       |
+    +-------------------------+
+
+All the fields contain 32-bit unsigned, big endian integers.
+The ``ntohl()`` function provided by the socket API can be used to convert
+them to host byte-order.
+
+*magic bytes* (uint32, big endian)
+    The magic bytes are used to identify SquashDelta files. They are
+    always equal to ``0x5371ceb4`` (``Sqδ`` in UTF-8). If the magic
+    bytes are not equal to this value, the file needs to be refused
+    as invalid SquashDelta file.
+
+*flags* (uint32, big endian, bit-field)
+    The flags field is currently unused and is reserved for encoding
+    additional information about the file, including enabled features
+    and format changes. It needs to be equal to `0`. If any of the bits
+    are set, the file needs to be refused as using unsupported features.
+
+*compression* (uint32, big endian, partial bit-field)
+    The compression field is used to store the compression algorithm
+    used in the input file and its options. The exact details depend
+    on the algorithm in use and are detailed in a separate section.
+    If the field is set to an unrecognized value, the file needs to
+    be refused as using unsupported compressor (or compressor options,
+    appropriately).
+
+*block count* (uint32, big endian)
+    The uncompressed block count, and therefore the length of the block
+    list following (or preceding) the header.
+
+
+Compression information
+~~~~~~~~~~~~~~~~~~~~~~~
+
+The compression information field contains both the compressor
+identifier, and its options (if applicable). Storing this information
+inside the delta allows the reconstruction tool to be unaware of input
+file format.
+
+The LZO compression format is stored in the following manner:
+
+    +--------+---------+---+------+
+    | 31..24 |  23..9  | 8 | 7..0 |
+    +========+=========+===+======+
+    |  0x01  | 00...00 | o | algo |
+    +--------+---------+---+------+
+
+The highest nibble is used to store the LZO format identifier (`0x01`).
+
+The lowest nibble stores the algorithm and compression level identifier.
+The currently supported algorithms are:
+
+* lzo1x_999 --- using values from 1 to 9 indicating compression level.
+
+Another value in the algorithm nibble needs to be refused as unsupported
+LZO algorithm.
+
+The two middle nibbles are used as a flag field. The lowest bit
+of the field (bit 8 of the uint32) is used to store the `optimized`
+state. If the bit is set, the ``lzo1x_optimize()`` function was called
+*once* after compressing the input, and therefore it needs to be used
+after recompressing it.
+
+Remaining bits are not used currently and need to be set to zeros.
+If any of the other bits is set, the file needs to be refused as using
+unsupported compression options.
+
+The LZ4 compression format is stored in the following manner:
+
+    +--------+---------+---+
+    | 31..24 |  23..1  | 0 |
+    +========+=========+===+
+    |  0x02  | 00...00 | h |
+    +--------+---------+---+
+
+The highest nibble is used to store the LZ4 format identifier (`0x02`).
+
+The remaining nibbles are used as a flag field. The lowest bit is used
+to indicate the use of `lz4hc` (high compression) version of LZ4. If it
+is unset, the regular compression variant is used.
+
+Remaining bits are not used currently and need to be set to zeros.
+If any of the other bits is set, the file needs to be refused as using
+unsupported compression options.
+
+
+Block list
+~~~~~~~~~~
+
+The block list is a sequence of block entries. The number of block
+entries is specified in the `block count` header field. The list is not
+terminated nor padded, therefore the last block entry is followed by
+the next file segment.
+
+Each block list entry is laid out as:
+
+    +----+----------------+---+
+    | 31 |      ...       | 0 |
+    +====+================+===+
+    |         offset          |
+    +-------------------------+
+    |         length          |
+    +-------------------------+
+    |   uncompressed length   |
+    +-------------------------+
+
+All the fields contain 32-bit unsigned, big endian integers.
+The ``ntohl()`` function provided by the socket API can be used to convert
+them to host byte-order.
+
+*offset* (uint32, big endian)
+    Offset of the compressed data in the original input file. This value
+    is used to locate the data for expansion in the source file, and to
+    place the recompressed data in the reconstructed target file.
+
+*length* (uint32, big endian)
+    Length of the compressed data in the original input file. This value
+    is used to obtain the data for expansion in the source file.
+    The compressed data after recompression must be of the same length.
+
+*uncompressed length* (uint32, big endian)
+    Length of the uncompressed data corresponding to the compressed
+    block. The data after decompressing the source file blocks must be
+    of this size. This value is used to locate uncompressed data
+    in the expanded file.
+
+
+Final notes
+-----------
+
+The SquashDelta format, while suited specifically for SquashFS images,
+can be used for other file formats that use compatible compression
+algorithms. However, the standard squashdelta_ tool supports SquashFS
+input only. squashmerge_ is more universal since it obtains all the data
+from SquashDelta patch and expanded file headers.
+
+The format does not use checksums of any kind, and does not check
+the validity of input file. Invalid input provided, the tool may fail
+at a random step with a semi-random error (such as seeking beyond EOF,
+decompression error or uncompressed/compressed size mismatch)
+or produce an invalid output file.
+
+It is recommended that the client checks correctness of the output file
+using a more refined tool. For example, detached GPG signatures can be
+used to verify the integrity of output along with confirming its
+authenticity.
