@@ -81,7 +81,7 @@ int compressor_init(uint32_t c)
 #endif
 			break;
 		case COMP_ID_LZ4:
-#ifdef ENABLE_LZO
+#ifdef ENABLE_LZ4
 			if (((c & COMP_LZ4_FLAG_MASK) & ~COMP_LZ4_KNOWN_FLAG_MASK) != 0)
 			{
 				fprintf(stderr, "Unknown LZ4 flags enabled: %08x\n",
