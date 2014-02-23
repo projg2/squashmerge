@@ -80,6 +80,7 @@ int compressor_init(uint32_t c)
 			return 0;
 #endif
 			break;
+
 		case COMP_ID_LZ4:
 #ifdef ENABLE_LZ4
 			if (((c & COMP_LZ4_FLAG_MASK) & ~COMP_LZ4_KNOWN_FLAG_MASK) != 0)
@@ -140,6 +141,8 @@ size_t compressor_compress(uint32_t c,
 			return out_bytes;
 		}
 #endif
+			break;
+
 		case COMP_ID_LZ4:
 #ifdef ENABLE_LZ4
 		{
@@ -159,6 +162,7 @@ size_t compressor_compress(uint32_t c,
 			return out_bytes;
 		}
 #endif
+			break;
 	}
 
 	return 0;
@@ -182,6 +186,8 @@ size_t compressor_decompress(uint32_t c,
 			return out_bytes;
 		}
 #endif
+			break;
+
 		case COMP_ID_LZ4:
 #ifdef ENABLE_LZ4
 		{
@@ -198,6 +204,7 @@ size_t compressor_decompress(uint32_t c,
 			return out_bytes;
 		}
 #endif
+			break;
 	}
 
 	return 0;
