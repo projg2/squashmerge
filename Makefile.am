@@ -2,8 +2,10 @@ bin_PROGRAMS = squashmerge
 
 squashmerge_SOURCES = \
 	src/compressor.c \
-	src/squashmerge.c \
-	src/util.c
+	src/compressor.h \
+	src/util.c \
+	src/util.h \
+	src/squashmerge.c
 
 squashmerge_CPPFLAGS = -pthread \
 	$(LZO_CFLAGS) \
