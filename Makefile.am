@@ -1,3 +1,5 @@
+SUBDIRS = . tests
+
 bin_PROGRAMS = squashmerge
 
 squashmerge_SOURCES = \
