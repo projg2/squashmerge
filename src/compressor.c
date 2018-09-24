@@ -153,7 +153,7 @@ size_t compressor_compress(uint32_t c,
 			else
 				out_bytes = LZ4_compress_limitedOutput(src, dest, length, out_size);
 
-			if (out_bytes < 0)
+			if (out_bytes <= 0)
 			{
 				fprintf(stderr, "LZ4 compression failed\n");
 				return 0;
