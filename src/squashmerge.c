@@ -259,9 +259,6 @@ void* decompress_blocks(void* data)
 		prev_offset += unc_length;
 	}
 
-	if (id == 0)
-		*pd->shared->prev_offset = prev_offset;
-
 	return pd;
 }
 
@@ -319,9 +316,11 @@ int expand_input(struct sqdelta_header* dh,
 			return 0;
 	}
 
+
 	/* copy the block lists and the header */
 	{
 		size_t block_list_size = sizeof(*source_blocks) * dh->block_count;
+		prev_offset = temp_source_f->length - sizeof(*dh) -  block_list_size;
 
 		void* in_pos = mmap_read(patch_f, sizeof(*dh),
 				block_list_size);
@@ -458,9 +457,6 @@ void* compress_blocks(void* data)
 		}
 	}
 
-	if (id == 0)
-		*pd->shared->prev_offset = prev_offset;
-
 	return pd;
 }
 
@@ -470,6 +466,7 @@ int squash_target_file(struct mmap_file* target_f)
 	size_t block_list_size, block_list_offset;
 	struct compressed_block* target_blocks;
 	size_t prev_offset;
+	size_t i;
 
 	dh = read_sqdelta_header(target_f, target_f->length - sizeof(dh));
 
@@ -495,6 +492,13 @@ int squash_target_file(struct mmap_file* target_f)
 
 		if (!run_multithreaded(compress_blocks, &d))
 			return 0;
+	}
+
+	for (i = dh.block_count; i > 0; --i)
+	{
+		size_t unc_length = ntohl(target_blocks[i - 1].uncompressed_length);
+
+		prev_offset -= unc_length;
 	}
 
 	/* truncate the resulting file */
