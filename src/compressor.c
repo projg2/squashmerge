@@ -157,12 +157,42 @@ size_t compressor_compress(uint32_t c,
 			void *dest_new = calloc(max_dest_size, 1);
 			if (c & COMP_LZ4_HC)
 			{
+				/*
+LZ4int LZ4_compress_HC
+(
+    const char * src,
+    char * dst,
+    int srcSize,
+    int dstCapacity,
+    int compressionLevel
+)
+: Compress data from src_ into dst, using the powerful but slower "HC" algorithm. 
+`dst must be already allocated. Compression is guaranteed to succeed if dstCapacity >= LZ4_compressBound(srcSize)_ (see "lz4.h") 
+Max supported srcSize value is LZ4_MAX_INPUT_SIZE (see "lz4.h") 
+`compressionLevel : any value between 1 and LZ4HC_CLEVEL_MAX will work. Values > LZ4HC_CLEVEL_MAX behave the same as LZ4HC_CLEVEL_MAX.
+Returns: the number of bytes written into 'dst' or 0 if compression fails.
+				*/
 				out_bytes = LZ4_compress_HC(src, dest_new, length, max_dest_size, LZ4HC_CLEVEL_MAX);
 				method = 1;
 				fprintf(stderr, "20.04 LZ4_compress_HC: source size: %lu, max_dest_size: %lu, out_bytes:%lu, expected size: %lu\n", length, max_dest_size, out_bytes, out_size);
 			}
 			else
 			{
+				/*
+LZ4int LZ4_compress_default
+(
+    const char * src,
+    char * dst,
+    int srcSize,
+    int dstCapacity
+)
+: Compresses 'srcSize' bytes from buffer 'src' into already allocated 'dst' buffer of size 'dstCapacity'. 
+Compression is guaranteed to succeed if 'dstCapacity' >= LZ4_compressBound(srcSize). It also runs faster, 
+so it's a recommended setting. If the function cannot compress 'src' into a more limited 'dst' budget, 
+compression stops immediately, and the function result is zero. In which case, 'dst' content is undefined (invalid). 
+srcSize : max supported value is LZ4_MAX_INPUT_SIZE. 
+dstCapacity : size of buffer 'dst' (which must be already allocated)			
+				*/
 				out_bytes = LZ4_compress_default(src, dest_new, length, max_dest_size);
 				fprintf(stderr, "20.04 LZ4_compress_default: source size: %lu, max_dest_size: %lu, out_bytes:%lu, expected size: %lu\n", length, max_dest_size, out_bytes, out_size);
 			}
