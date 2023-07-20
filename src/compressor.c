@@ -152,27 +152,34 @@ size_t compressor_compress(uint32_t c,
 			//now we are calling the new lz4 library in Ubuntu 20.04, which is liblz4-1:amd64, 1.9.2-2ubuntu0.20.04.1
 			//calculate the maximal dest size base on the source size
 			max_dest_size = LZ4_compressBound( length );
-			// we allocated using a worst case guess, The actual compressed size might be less than we allocated.		   
+			// we allocated using a worst case guess, The actual compressed size might be less than we allocated.
+			// doing so to prevent the API from potential data overflow
 			void *dest_new = calloc(max_dest_size, 1);
-			if (c & COMP_LZ4_HC) {
+			if (c & COMP_LZ4_HC)
+			{
 				out_bytes = LZ4_compress_HC(src, dest_new, length, max_dest_size, LZ4HC_CLEVEL_MAX);
 				method = 1;
-				fprintf(stderr, "20.04 LZ4_compress_HC with method: %d, source size: %lu, max_dest_size: %lu, out_bytes:%lu, expected size: %lu\n", method, length, max_dest_size, out_bytes, out_size);
+				fprintf(stderr, "20.04 LZ4_compress_HC: source size: %lu, max_dest_size: %lu, out_bytes:%lu, expected size: %lu\n", length, max_dest_size, out_bytes, out_size);
 			}
-			else {
+			else
+			{
 				out_bytes = LZ4_compress_default(src, dest_new, length, max_dest_size);
-				fprintf(stderr, "20.04 LZ4_compress_default with method: %d, source size: %lu, max_dest_size: %lu, out_bytes:%lu, expected size: %lu\n", method, length, max_dest_size, out_bytes, out_size);
+				fprintf(stderr, "20.04 LZ4_compress_default: source size: %lu, max_dest_size: %lu, out_bytes:%lu, expected size: %lu\n", length, max_dest_size, out_bytes, out_size);
 			}
 				
 			if (out_bytes <= 0)
 			{
 				fprintf(stderr, "LZ4 compression failed with method: %d, source size: %lu, allocated_size: %lu, expected_size: %lu, out_bytes:%lu\n", method, length, max_dest_size, out_size, out_bytes);
 				out_bytes = 0;
-			} else if (out_bytes > length) {
+			} 
+			else if (out_bytes > length)
+			{
 				// length is the uncompressed length
 				fprintf(stderr, "LZ4 no enough outbuffer space, failed with method: %d, source size: %lu, allocated size: %lu, expected_size: %lu, out_bytes:%lu\n", method, length, max_dest_size, out_size, out_bytes);
 				out_bytes = 0;
-			} else {
+			}
+			else
+			{
 				if (out_size != out_bytes)
 					fprintf(stderr, "20.04: mismatched: expected size: %lu, out_bytes: %lu\n", out_size, out_bytes);
 
@@ -180,15 +187,16 @@ size_t compressor_compress(uint32_t c,
 			}
 			free(dest_new);
 #else
-		//calling version liblz4-1:amd64, 0.0~r131-2ubuntu3.1
+		//we are calling version liblz4-1:amd64, 0.0~r131-2ubuntu3.1 on Ubuntu 18.04 repository
 			if (c & COMP_LZ4_HC) {
 				out_bytes = LZ4_compress_HC(src, dest, length, out_size, 12);
 				method = 1;
-				fprintf(stderr, "LZ4_compress_HC with method: %d, source size: %lu, out_size: %lu, out_bytes:%lu\n", method, length, out_size, out_bytes);
+				fprintf(stderr, "LZ4_compress_HC: source size: %lu, out_size: %lu, out_bytes:%lu\n", length, out_size, out_bytes);
 			}
-			else {
+			else
+			{
 				out_bytes = LZ4_compress_default(src, dest, length, out_size);
-				fprintf(stderr, "LZ4_compress_default with method: %d, source size: %lu, out_size: %lu, out_bytes:%lu\n", method, length, out_size, out_bytes);
+				fprintf(stderr, "LZ4_compress_default: source size: %lu, out_size: %lu, out_bytes:%lu\n", length, out_size, out_bytes);
 			}
 
 			if (out_bytes <= 0)
@@ -206,6 +214,7 @@ size_t compressor_compress(uint32_t c,
 
 	return 0;
 }
+
 size_t compressor_decompress(uint32_t c,
 		void* dest, const void* src, size_t length, size_t out_size)
 {
